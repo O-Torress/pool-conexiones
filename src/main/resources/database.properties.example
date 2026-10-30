@@ -1,0 +1,11 @@
+# Copiar este archivo como database.properties y completar la clave.
+# database.properties NO se sube al repositorio.
+#
+# Tambien se puede configurar con variables de entorno:
+#   SAKILA_DB_URL=jdbc:postgresql://localhost:5432/sakila
+#   SAKILA_DB_USER=postgres
+#   SAKILA_DB_PASSWORD=tu_clave
+
+db.url=jdbc:postgresql://localhost:5432/sakila
+db.user=postgres
+db.password=CAMBIAR_ESTA_CLAVE

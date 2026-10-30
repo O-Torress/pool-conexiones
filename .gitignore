@@ -10,3 +10,6 @@ target/
 # Archivos de sistema operativo
 .DS_Store
 Thumbs.db
+
+# Configuracion local de base de datos (no subir credenciales)
+src/main/resources/database.properties
