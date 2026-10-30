@@ -1,0 +1,12 @@
+# Compilación de Maven y binarios
+target/
+*.class
+
+# Archivos de configuración de IDEs (VS Code / IntelliJ)
+.vscode/
+.idea/
+*.iml
+
+# Archivos de sistema operativo
+.DS_Store
+Thumbs.db
