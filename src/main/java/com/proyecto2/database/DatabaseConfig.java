@@ -4,19 +4,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.Properties;
 
-/**
- * Configuracion de conexion a PostgreSQL/Sakila.
- *
- * Prioridad:
- *  1. Propiedad del sistema: -Dsakila.db.url=..., -Dsakila.db.user=...,
- *     -Dsakila.db.password=...
- *  2. Variable de entorno: SAKILA_DB_URL, SAKILA_DB_USER, SAKILA_DB_PASSWORD
- *     (tambien se aceptan DB_URL, DB_USER y DB_PASSWORD).
- *  3. Archivo src/main/resources/database.properties.
- *  4. Valores por defecto: localhost:5432/sakila, usuario postgres.
- *
- * El archivo database.properties NO debe subirse al repositorio.
- */
 public final class DatabaseConfig {
 
     public static final String DEFAULT_URL =

@@ -32,6 +32,7 @@ public class DatabaseConnection implements AutoCloseable {
     private final int queryTimeoutSeconds;
 
     private volatile boolean closed;
+    private volatile Runnable onClose;
 
     /**
      * Conexion simulada con los valores por defecto. Se mantiene para que
@@ -182,18 +183,42 @@ public class DatabaseConnection implements AutoCloseable {
         return simulatedQueryFailureRate;
     }
 
-    @Override
-    public void close() {
-        if (closed) {
+    /**
+     * Registra una accion que se ejecuta una sola vez al cerrar la conexion.
+     * Se usa para liberar el cupo de conexiones simultaneas del modo sin pool.
+     */
+    public synchronized void setOnClose(Runnable onClose) {
+        if (onClose == null) {
             return;
         }
-        closed = true;
+        if (closed) {
+            onClose.run();
+            return;
+        }
+        this.onClose = onClose;
+    }
 
-        if (jdbcConnection != null) {
-            try {
+    @Override
+    public void close() {
+        Runnable hook;
+        synchronized (this) {
+            if (closed) {
+                return;
+            }
+            closed = true;
+            hook = onClose;
+            onClose = null;
+        }
+
+        try {
+            if (jdbcConnection != null) {
                 jdbcConnection.close();
-            } catch (SQLException ignored) {
-                // Cierre best-effort.
+            }
+        } catch (SQLException ignored) {
+            // Cierre best-effort.
+        } finally {
+            if (hook != null) {
+                hook.run();
             }
         }
     }

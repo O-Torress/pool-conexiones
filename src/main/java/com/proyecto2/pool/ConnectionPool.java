@@ -8,6 +8,7 @@ import java.util.Deque;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
@@ -156,6 +157,45 @@ public class ConnectionPool implements AutoCloseable {
         this.maxSize = maxSize;
         this.connectionFactory = connectionFactory;
         this.defaultBorrowTimeoutMillis = defaultBorrowTimeoutMillis;
+    }
+
+    /**
+     * Envuelve una fabrica para limitar cuantas conexiones pueden abrirse al
+     * mismo tiempo.
+     *
+     * Se usa en el modo SIN POOL: aunque cada peticion cree una conexion
+     * nueva, el servidor de base de datos no acepta infinitas conexiones
+     * simultaneas. Sin este limite, la simulacion abriria miles de conexiones
+     * en paralelo y el modo sin pool pareceria mas rapido que el pool, lo cual
+     * no ocurre en un servidor real.
+     */
+    public static ConnectionFactory limited(
+            ConnectionFactory delegate, int maxConcurrentCreations) {
+        if (delegate == null) {
+            throw new IllegalArgumentException("delegate no puede ser null");
+        }
+        if (maxConcurrentCreations <= 0) {
+            throw new IllegalArgumentException(
+                "maxConcurrentCreations debe ser mayor que 0");
+        }
+
+        Semaphore permits = new Semaphore(maxConcurrentCreations, true);
+        return () -> {
+            boolean acquired = false;
+            try {
+                permits.acquire();
+                acquired = true;
+                return delegate.create();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new SQLException(
+                    "Interrumpido esperando cupo para abrir una conexion", e);
+            } finally {
+                if (acquired) {
+                    permits.release();
+                }
+            }
+        };
     }
 
     public DatabaseConnection borrow()

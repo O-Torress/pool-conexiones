@@ -16,16 +16,6 @@ import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 
-/**
- * Demo real contra PostgreSQL/Sakila.
- *
- * Lee la configuracion de DatabaseConfig (variables de entorno o
- * src/main/resources/database.properties) y compara:
- *  - con pool reutilizando conexiones
- *  - sin pool abriendo una conexion nueva por cada intento
- *
- * Requiere el driver de PostgreSQL (ya declarado en pom.xml).
- */
 public final class SakilaSimulationDemo {
 
     private static final int CLIENT_COUNT = 10;

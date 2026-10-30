@@ -8,12 +8,6 @@ import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.util.Properties;
 
-/**
- * Fabrica de conexiones JDBC reales contra PostgreSQL/Sakila.
- *
- * La usa tanto ConnectionPool (modo con pool) como ClientThread (modo sin pool),
- * de modo que ambas modalidades comparen exactamente el mismo costo de apertura.
- */
 public final class PostgresConnectionFactory
         implements ConnectionPool.ConnectionFactory {
 

@@ -10,17 +10,6 @@ import com.proyecto2.query.QueryRandomizer;
 import java.sql.SQLException;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- * Cliente concurrente que ejecuta un conjunto de peticiones.
- *
- * Puede trabajar de dos formas:
- *  - WITH_POOL: pide una conexion al pool y la devuelve al terminar.
- *  - WITHOUT_POOL: abre una conexion nueva por cada intento.
- *
- * En ambos casos se registra UNA metrica por peticion logica. El tiempo de
- * respuesta incluye la espera por conexion, todos los intentos y el backoff.
- * Los reintentos se informan aparte.
- */
 public class ClientThread implements Runnable {
 
     public enum Mode {

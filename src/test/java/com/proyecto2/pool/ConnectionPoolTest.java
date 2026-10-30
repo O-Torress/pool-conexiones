@@ -253,4 +253,48 @@ public class ConnectionPoolTest {
             pool.close();
         }
     }
+
+    @Test
+    public void limitedFactoryNeverExceedsConcurrentCreations() throws Exception {
+        int limit = 3;
+        AtomicInteger activeCreations = new AtomicInteger();
+        AtomicInteger maxActiveCreations = new AtomicInteger();
+        ConnectionPool.ConnectionFactory factory = ConnectionPool.limited(() -> {
+            int active = activeCreations.incrementAndGet();
+            maxActiveCreations.accumulateAndGet(active, Math::max);
+            try {
+                Thread.sleep(25);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new java.sql.SQLException("Creacion interrumpida", e);
+            } finally {
+                activeCreations.decrementAndGet();
+            }
+            return new DatabaseConnection(0.0, 0, 0);
+        }, limit);
+
+        int workers = 12;
+        AtomicReference<Throwable> error = new AtomicReference<>();
+        List<Thread> threads = new ArrayList<>();
+        for (int i = 0; i < workers; i++) {
+            Thread worker = new Thread(() -> {
+                try {
+                    DatabaseConnection connection = factory.create();
+                    connection.close();
+                } catch (Throwable t) {
+                    error.compareAndSet(null, t);
+                }
+            });
+            threads.add(worker);
+            worker.start();
+        }
+        for (Thread worker : threads) {
+            worker.join(5000);
+        }
+
+        assertNull(error.get());
+        assertTrue("maxActiveCreations=" + maxActiveCreations.get(),
+            maxActiveCreations.get() <= limit);
+        assertEquals(0, activeCreations.get());
+    }
 }

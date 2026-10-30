@@ -158,8 +158,11 @@ public class App extends Application {
         lblPoolSection.setTextFill(Color.web("#2980b9"));
 
         spnPoolSize = intSpinner(1, 50, 10, "Tamano del pool");
-        spnClients = intSpinner(1, 100, 20, "Numero de clientes");
-        spnRequestsPerClient = intSpinner(1, 500, 50, "Peticiones por cliente");
+        spnClients = intSpinner(1, 10000, 20,
+            "Numero de clientes concurrentes (hasta 10000)");
+        spnRequestsPerClient = intSpinner(1, 1, 1,
+            "Fijo en 1 peticion por cliente");
+        spnRequestsPerClient.setDisable(true);
 
         // Reintentos
         Label lblRetrySection = new Label("Reintentos");
@@ -212,7 +215,7 @@ public class App extends Application {
             lblPoolSection,
             labeledControl("Tamano del pool:", spnPoolSize),
             labeledControl("Clientes:", spnClients),
-            labeledControl("Peticiones/cliente:", spnRequestsPerClient),
+            labeledControl("Peticiones/cliente (fijo):", spnRequestsPerClient),
             new Separator(),
             lblRetrySection,
             labeledControl("Max reintentos:", spnMaxRetries),
@@ -353,10 +356,11 @@ public class App extends Application {
         progressBar.setProgress(ProgressBar.INDETERMINATE_PROGRESS);
         lblProgress.setText("Preparando simulacion...");
 
-        // Leer parametros desde los spinners
+        // Leer parametros desde los spinners. Las peticiones por cliente son
+        // fijas en 1 por diseno de la practica.
         final int poolSize = spnPoolSize.getValue();
         final int clientCount = spnClients.getValue();
-        final int requestsPerClient = spnRequestsPerClient.getValue();
+        final int requestsPerClient = 1;
         final int maxRetries = spnMaxRetries.getValue();
         final long retryBackoff = spnRetryBackoff.getValue();
         final double failureRate = spnFailureRate.getValue();
@@ -367,14 +371,34 @@ public class App extends Application {
         appendLog("  NUEVA SIMULACION");
         appendLog("==================================================");
         appendLog(String.format(
-            "Parametros: %d clientes x %d peticiones = %d totales",
+            "Parametros: %d clientes x %d peticion = %d peticiones totales",
             clientCount, requestsPerClient, clientCount * requestsPerClient));
         appendLog(String.format(
-            "Pool: %d | Fallo: %.0f%% | Reintentos: %d | Backoff: %d ms",
+            "Pool: %d | Fallo por intento: %.0f%% | Reintentos: %d | Backoff: %d ms",
             poolSize, failureRate * 100, maxRetries, retryBackoff));
         appendLog(String.format(
             "Latencia conexion: %d ms | Latencia query: %d ms",
             connectLatency, queryLatency));
+
+        // Explicacion del modelo de fallos: los reintentos ocultan fallos.
+        double finalFailureRate = Math.pow(failureRate, maxRetries + 1);
+        appendLog(String.format(
+            "Modelo de fallos: %d intento(s) por peticion (1 + %d reintentos).",
+            1 + maxRetries, maxRetries));
+        appendLog(String.format(
+            "  Fallo definitivo esperado: %.4f%% (~%.1f de %d peticiones).",
+            finalFailureRate * 100.0,
+            finalFailureRate * clientCount,
+            clientCount));
+        appendLog(String.format(
+            "Sin pool: la base acepta como maximo %d conexiones simultaneas "
+            + "(mismo limite que el pool).", poolSize));
+        if (maxRetries == 0) {
+            appendLog("  AVISO: sin reintentos, cada fallo de query es definitivo.");
+        }
+        if (failureRate == 0.0) {
+            appendLog("  AVISO: tasa de fallo 0%; no se simularan fallos de query.");
+        }
         appendLog("");
 
         ConnectionPool.ConnectionFactory factory = () ->
@@ -393,7 +417,8 @@ public class App extends Application {
                 MetricsCollector poolMetrics = new MetricsCollector();
                 long poolWallTime = runSimulation(
                     true, poolSize, clientCount, requestsPerClient,
-                    maxRetries, retryBackoff, factory, randomizer, poolMetrics);
+                    maxRetries, retryBackoff, queryLatency,
+                    factory, randomizer, poolMetrics);
 
                 appendLog(String.format(
                     "[CON POOL] Completado en %d ms", poolWallTime));
@@ -409,7 +434,8 @@ public class App extends Application {
                 MetricsCollector noPoolMetrics = new MetricsCollector();
                 long noPoolWallTime = runSimulation(
                     false, poolSize, clientCount, requestsPerClient,
-                    maxRetries, retryBackoff, factory, randomizer, noPoolMetrics);
+                    maxRetries, retryBackoff, queryLatency,
+                    factory, randomizer, noPoolMetrics);
 
                 appendLog(String.format(
                     "[SIN POOL] Completado en %d ms", noPoolWallTime));
@@ -419,22 +445,41 @@ public class App extends Application {
                 // FASE 3: Comparacion
                 double poolAvg = poolMetrics.getAverageResponseTime();
                 double noPoolAvg = noPoolMetrics.getAverageResponseTime();
-                double improvement = noPoolAvg > 0
+                double wallImprovement = noPoolWallTime > 0
+                    ? ((noPoolWallTime - (double) poolWallTime) / noPoolWallTime) * 100.0
+                    : 0.0;
+                double avgImprovement = noPoolAvg > 0
                     ? ((noPoolAvg - poolAvg) / noPoolAvg) * 100.0
                     : 0.0;
+                long poolAttempts = poolMetrics.getTotalRequests()
+                    + poolMetrics.getTotalRetries();
+                long noPoolAttempts = noPoolMetrics.getTotalRequests()
+                    + noPoolMetrics.getTotalRetries();
 
                 appendLog("");
                 appendLog("==================================================");
                 appendLog(String.format(
-                    "  RESULTADO: Mejora con pool = %.2f%%", improvement));
+                    "  RESULTADO: mejora en tiempo de pared = %.2f%%",
+                    wallImprovement));
+                appendLog(String.format(
+                    "  RESULTADO: mejora en tiempo promedio = %.2f%%",
+                    avgImprovement));
+                appendLog(String.format(
+                    "  Tiempo de pared CON POOL:  %d ms", poolWallTime));
+                appendLog(String.format(
+                    "  Tiempo de pared SIN POOL: %d ms", noPoolWallTime));
                 appendLog(String.format(
                     "  Tiempo promedio CON POOL:  %.2f ms", poolAvg));
                 appendLog(String.format(
                     "  Tiempo promedio SIN POOL: %.2f ms", noPoolAvg));
                 appendLog(String.format(
-                    "  Tiempo de pared CON POOL:  %d ms", poolWallTime));
+                    "  Intentos CON POOL:  %d (%d reintentos, %d fallos definitivos)",
+                    poolAttempts, poolMetrics.getTotalRetries(),
+                    poolMetrics.getFailedRequests()));
                 appendLog(String.format(
-                    "  Tiempo de pared SIN POOL: %d ms", noPoolWallTime));
+                    "  Intentos SIN POOL: %d (%d reintentos, %d fallos definitivos)",
+                    noPoolAttempts, noPoolMetrics.getTotalRetries(),
+                    noPoolMetrics.getFailedRequests()));
                 appendLog("==================================================");
 
                 Platform.runLater(() ->
@@ -464,14 +509,31 @@ public class App extends Application {
     private long runSimulation(boolean withPool, int poolSize,
                                int clientCount, int requestsPerClient,
                                int maxRetries, long retryBackoff,
+                               long queryLatencyMillis,
                                ConnectionPool.ConnectionFactory factory,
                                QueryRandomizer randomizer,
                                MetricsCollector metrics) {
 
         ConnectionPool pool = null;
         try {
+            // Sin pool cada peticion abre una conexion nueva, pero el servidor
+            // de base de datos no acepta infinitas conexiones simultaneas.
+            // Se usa el tamano del pool como capacidad de la base para que la
+            // comparacion sea realista y no "sin pool" parezca mas rapido.
+            ConnectionPool.ConnectionFactory effectiveFactory = withPool
+                ? factory
+                : ConnectionPool.limited(factory, poolSize);
+
             if (withPool) {
-                pool = new ConnectionPool(poolSize, factory);
+                // Con miles de clientes, el timeout fijo de 5 s es demasiado
+                // corto: los clientes que esperan su turno empiezan a fallar
+                // aunque el pool este funcionando bien. Se calcula un timeout
+                // acorde al peor caso de la corrida.
+                long borrowTimeout = computePoolBorrowTimeout(
+                    poolSize, clientCount, requestsPerClient, queryLatencyMillis);
+                appendLog(String.format(
+                    "[CON POOL] Timeout de espera: %d ms", borrowTimeout));
+                pool = new ConnectionPool(poolSize, factory, borrowTimeout);
                 pool.warmUp();
             }
 
@@ -484,7 +546,7 @@ public class App extends Application {
                         maxRetries, retryBackoff);
                 } else {
                     client = ClientThread.withoutPool(
-                        i, requestsPerClient, factory, randomizer, metrics,
+                        i, requestsPerClient, effectiveFactory, randomizer, metrics,
                         maxRetries, retryBackoff);
                 }
                 threads.add(new Thread(client, "cliente-" + i));
@@ -497,8 +559,16 @@ public class App extends Application {
             for (Thread t : threads) {
                 t.join();
             }
-            return TimeUnit.NANOSECONDS.toMillis(
+            long wallMillis = TimeUnit.NANOSECONDS.toMillis(
                 System.nanoTime() - startNanos);
+
+            int expectedRequests = clientCount * requestsPerClient;
+            if (metrics.getTotalRequests() != expectedRequests) {
+                appendLog(String.format(
+                    "[AVISO] Peticiones registradas: %d de %d",
+                    metrics.getTotalRequests(), expectedRequests));
+            }
+            return wallMillis;
 
         } catch (SQLException e) {
             appendLog("[ERROR] SQL: " + e.getMessage());
@@ -512,6 +582,26 @@ public class App extends Application {
                 pool.close();
             }
         }
+    }
+
+    /**
+     * Calcula un timeout de espera del pool acorde al peor caso de la corrida.
+     *
+     * El valor por defecto (5 s) sirve para cargas pequenas, pero con miles de
+     * clientes el ultimo de la cola puede esperar mas que eso aunque el pool
+     * este funcionando correctamente. Se estima el tiempo total de la fase y
+     * se deja un margen.
+     */
+    private static long computePoolBorrowTimeout(int poolSize, int clientCount,
+                                                 int requestsPerClient,
+                                                 long queryLatencyMillis) {
+        long effectiveQueryMillis = Math.max(queryLatencyMillis, 1L);
+        long estimatedWallMillis = (long) Math.ceil(
+            (double) clientCount * requestsPerClient
+            * effectiveQueryMillis / poolSize);
+        long timeout = estimatedWallMillis * 2L + 5_000L;
+        return Math.max(ConnectionPool.DEFAULT_BORROW_TIMEOUT_MILLIS,
+            Math.min(timeout, 120_000L));
     }
 
     // ==========================================================

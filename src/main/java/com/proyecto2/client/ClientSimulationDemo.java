@@ -10,12 +10,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
-/**
- * Demo independiente para comparar "con pool" vs "sin pool".
- *
- * No depende de JavaFX ni de la UI. Se puede ejecutar como una clase main
- * desde VS Code o desde la linea de comandos.
- */
 public final class ClientSimulationDemo {
 
     private static final int CLIENT_COUNT = 20;
