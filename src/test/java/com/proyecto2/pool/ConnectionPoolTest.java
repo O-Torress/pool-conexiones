@@ -16,6 +16,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -248,7 +249,7 @@ public class ConnectionPoolTest {
             assertEquals(3, stats.getTotalCreated());
             assertEquals(0, stats.getTotalBorrowed());
             assertEquals(0, stats.getTotalReleased());
-            assertTrue(!stats.isClosed());
+            assertFalse(stats.isClosed());
         } finally {
             pool.close();
         }
