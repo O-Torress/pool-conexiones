@@ -1,9 +1,9 @@
 package com.proyecto2.ui;
 
 import com.proyecto2.client.ClientThread;
+import com.proyecto2.database.SimulatedDatabase;
 import com.proyecto2.metrics.MetricsCollector;
 import com.proyecto2.pool.ConnectionPool;
-import com.proyecto2.pool.DatabaseConnection;
 import com.proyecto2.query.QueryRandomizer;
 
 import javafx.application.Application;
@@ -19,6 +19,7 @@ import javafx.scene.control.Button;
 import javafx.scene.control.Control;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressBar;
+import javafx.scene.control.ScrollPane;
 import javafx.scene.control.Separator;
 import javafx.scene.control.Spinner;
 import javafx.scene.control.TextArea;
@@ -62,6 +63,9 @@ public class App extends Application {
     private Spinner<Integer> spnConnectLatency;
     private Spinner<Integer> spnQueryLatency;
     private Spinner<Integer> spnRetryBackoff;
+    private Spinner<Integer> spnBorrowTimeout;
+    private Spinner<Integer> spnDbMaxConnections;
+    private Spinner<Integer> spnDbCores;
 
     // Controles de ejecucion
     private Button btnRun;
@@ -73,10 +77,12 @@ public class App extends Application {
     private Label lblPoolTotal, lblPoolSuccess, lblPoolFailed;
     private Label lblPoolRetries, lblPoolAvgTime, lblPoolSuccessRate;
     private Label lblPoolWallTime;
+    private Label lblPoolOpened, lblPoolPeak, lblPoolRejected;
 
     private Label lblNoPoolTotal, lblNoPoolSuccess, lblNoPoolFailed;
     private Label lblNoPoolRetries, lblNoPoolAvgTime, lblNoPoolSuccessRate;
     private Label lblNoPoolWallTime;
+    private Label lblNoPoolOpened, lblNoPoolPeak, lblNoPoolRejected;
 
     // Grafico comparativo
     private BarChart<String, Number> chart;
@@ -104,7 +110,10 @@ public class App extends Application {
         root.setCenter(center);
 
         // Izquierda: Configuracion
-        root.setLeft(createConfigPanel());
+        ScrollPane configScroll = new ScrollPane(createConfigPanel());
+        configScroll.setFitToWidth(true);
+        configScroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        root.setLeft(configScroll);
 
         // Inferior: Log
         root.setBottom(createLogSection());
@@ -157,7 +166,11 @@ public class App extends Application {
         lblPoolSection.setFont(Font.font("System", FontWeight.SEMI_BOLD, 13));
         lblPoolSection.setTextFill(Color.web("#2980b9"));
 
-        spnPoolSize = intSpinner(1, 50, 10, "Tamano del pool");
+        spnPoolSize = intSpinner(1, 200, 10,
+            "Conexiones que el pool mantiene abiertas y reutiliza");
+        spnBorrowTimeout = intSpinner(100, 120_000, 30_000,
+            "Tiempo maximo que un cliente espera una conexion libre "
+            + "(HikariCP usa 30000 ms por defecto)");
         spnClients = intSpinner(1, 10000, 20,
             "Numero de clientes concurrentes (hasta 10000)");
         spnRequestsPerClient = intSpinner(1, 1, 1,
@@ -173,13 +186,22 @@ public class App extends Application {
         spnRetryBackoff = intSpinner(0, 500, 10, "Backoff (ms)");
 
         // Simulacion
-        Label lblSimSection = new Label("Conexion simulada");
+        Label lblSimSection = new Label("Servidor de BD (simulado)");
         lblSimSection.setFont(Font.font("System", FontWeight.SEMI_BOLD, 13));
         lblSimSection.setTextFill(Color.web("#2980b9"));
 
-        spnFailureRate = doubleSpinner(0.0, 1.0, 0.10, 0.05, "Tasa de fallo");
-        spnConnectLatency = intSpinner(0, 1000, 50, "Latencia conexion (ms)");
-        spnQueryLatency = intSpinner(0, 500, 10, "Latencia query (ms)");
+        spnDbMaxConnections = intSpinner(1, 10_000, 100,
+            "max_connections del servidor (PostgreSQL trae 100 por defecto). "
+            + "Las conexiones por encima de este limite se RECHAZAN.");
+        spnDbCores = intSpinner(1, 128, 8,
+            "Nucleos de CPU del servidor: cuantas operaciones (abrir conexion "
+            + "o ejecutar query) puede atender a la vez");
+        spnFailureRate = doubleSpinner(0.0, 1.0, 0.0, 0.01,
+            "Fallo aleatorio de cada query (ruido de red). Afecta igual a "
+            + "ambos modos; dejar en 0 para ver solo el efecto del pool.");
+        spnConnectLatency = intSpinner(0, 1000, 50,
+            "Costo de abrir una conexion: crear el backend + autenticacion (ms)");
+        spnQueryLatency = intSpinner(0, 500, 10, "Costo de ejecutar una query (ms)");
 
         // Botones
         HBox buttons = new HBox(10);
@@ -214,6 +236,7 @@ public class App extends Application {
             new Separator(),
             lblPoolSection,
             labeledControl("Tamano del pool:", spnPoolSize),
+            labeledControl("Timeout de espera (ms):", spnBorrowTimeout),
             labeledControl("Clientes:", spnClients),
             labeledControl("Peticiones/cliente (fijo):", spnRequestsPerClient),
             new Separator(),
@@ -222,7 +245,9 @@ public class App extends Application {
             labeledControl("Backoff (ms):", spnRetryBackoff),
             new Separator(),
             lblSimSection,
-            labeledControl("Tasa de fallo:", spnFailureRate),
+            labeledControl("max_connections BD:", spnDbMaxConnections),
+            labeledControl("Nucleos CPU BD:", spnDbCores),
+            labeledControl("Fallo aleatorio query:", spnFailureRate),
             labeledControl("Lat. conexion (ms):", spnConnectLatency),
             labeledControl("Lat. query (ms):", spnQueryLatency),
             new Separator(),
@@ -260,9 +285,15 @@ public class App extends Application {
         addMetricRow(poolGrid, 1, "Exitosas:", lblPoolSuccess);
         addMetricRow(poolGrid, 2, "Fallidas:", lblPoolFailed);
         addMetricRow(poolGrid, 3, "Reintentos:", lblPoolRetries);
-        addMetricRow(poolGrid, 4, "Tiempo promedio:", lblPoolAvgTime);
+        addMetricRow(poolGrid, 4, "Tiempo prom. (exitosas):", lblPoolAvgTime);
         addMetricRow(poolGrid, 5, "Tasa de exito:", lblPoolSuccessRate);
         addMetricRow(poolGrid, 6, "Tiempo total:", lblPoolWallTime);
+        lblPoolOpened = metricValue("0");
+        lblPoolPeak = metricValue("0");
+        lblPoolRejected = metricValue("0");
+        addMetricRow(poolGrid, 7, "Conexiones abiertas:", lblPoolOpened);
+        addMetricRow(poolGrid, 8, "Pico simultaneo en BD:", lblPoolPeak);
+        addMetricRow(poolGrid, 9, "Rechazos de la BD:", lblPoolRejected);
         poolPanel.getChildren().add(poolGrid);
 
         // Panel SIN POOL
@@ -283,9 +314,15 @@ public class App extends Application {
         addMetricRow(noPoolGrid, 1, "Exitosas:", lblNoPoolSuccess);
         addMetricRow(noPoolGrid, 2, "Fallidas:", lblNoPoolFailed);
         addMetricRow(noPoolGrid, 3, "Reintentos:", lblNoPoolRetries);
-        addMetricRow(noPoolGrid, 4, "Tiempo promedio:", lblNoPoolAvgTime);
+        addMetricRow(noPoolGrid, 4, "Tiempo prom. (exitosas):", lblNoPoolAvgTime);
         addMetricRow(noPoolGrid, 5, "Tasa de exito:", lblNoPoolSuccessRate);
         addMetricRow(noPoolGrid, 6, "Tiempo total:", lblNoPoolWallTime);
+        lblNoPoolOpened = metricValue("0");
+        lblNoPoolPeak = metricValue("0");
+        lblNoPoolRejected = metricValue("0");
+        addMetricRow(noPoolGrid, 7, "Conexiones abiertas:", lblNoPoolOpened);
+        addMetricRow(noPoolGrid, 8, "Pico simultaneo en BD:", lblNoPoolPeak);
+        addMetricRow(noPoolGrid, 9, "Rechazos de la BD:", lblNoPoolRejected);
         noPoolPanel.getChildren().add(noPoolGrid);
 
         section.getChildren().addAll(poolPanel, noPoolPanel);
@@ -349,23 +386,35 @@ public class App extends Application {
         if (running.get()) {
             return;
         }
+
+        // Leer parametros desde los spinners. Las peticiones por cliente son
+        // fijas en 1 por diseno de la practica.
+        final int poolSize = spnPoolSize.getValue();
+        final long borrowTimeout = spnBorrowTimeout.getValue();
+        final int clientCount = spnClients.getValue();
+        final int requestsPerClient = 1;
+        final int maxRetries = spnMaxRetries.getValue();
+        final long retryBackoff = spnRetryBackoff.getValue();
+        final int dbMaxConnections = spnDbMaxConnections.getValue();
+        final int dbCores = spnDbCores.getValue();
+        final double failureRate = spnFailureRate.getValue();
+        final long connectLatency = spnConnectLatency.getValue();
+        final long queryLatency = spnQueryLatency.getValue();
+
+        if (poolSize > dbMaxConnections) {
+            appendLog(String.format(
+                "[ERROR] El pool (%d) no puede ser mayor que max_connections de la BD (%d): "
+                + "el servidor rechazaria las conexiones del propio pool.",
+                poolSize, dbMaxConnections));
+            return;
+        }
+
         running.set(true);
         btnRun.setDisable(true);
         btnRun.setText("Ejecutando...");
         progressBar.setVisible(true);
         progressBar.setProgress(ProgressBar.INDETERMINATE_PROGRESS);
         lblProgress.setText("Preparando simulacion...");
-
-        // Leer parametros desde los spinners. Las peticiones por cliente son
-        // fijas en 1 por diseno de la practica.
-        final int poolSize = spnPoolSize.getValue();
-        final int clientCount = spnClients.getValue();
-        final int requestsPerClient = 1;
-        final int maxRetries = spnMaxRetries.getValue();
-        final long retryBackoff = spnRetryBackoff.getValue();
-        final double failureRate = spnFailureRate.getValue();
-        final long connectLatency = spnConnectLatency.getValue();
-        final long queryLatency = spnQueryLatency.getValue();
 
         appendLog("==================================================");
         appendLog("  NUEVA SIMULACION");
@@ -374,55 +423,46 @@ public class App extends Application {
             "Parametros: %d clientes x %d peticion = %d peticiones totales",
             clientCount, requestsPerClient, clientCount * requestsPerClient));
         appendLog(String.format(
-            "Pool: %d | Fallo por intento: %.0f%% | Reintentos: %d | Backoff: %d ms",
-            poolSize, failureRate * 100, maxRetries, retryBackoff));
+            "Pool: %d conexiones | Timeout de espera: %d ms | Reintentos: %d | Backoff: %d ms",
+            poolSize, borrowTimeout, maxRetries, retryBackoff));
         appendLog(String.format(
-            "Latencia conexion: %d ms | Latencia query: %d ms",
-            connectLatency, queryLatency));
-
-        // Explicacion del modelo de fallos: los reintentos ocultan fallos.
-        double finalFailureRate = Math.pow(failureRate, maxRetries + 1);
+            "Servidor BD: max_connections=%d | CPU=%d nucleos | abrir conexion=%d ms | query=%d ms",
+            dbMaxConnections, dbCores, connectLatency, queryLatency));
         appendLog(String.format(
-            "Modelo de fallos: %d intento(s) por peticion (1 + %d reintentos).",
-            1 + maxRetries, maxRetries));
-        appendLog(String.format(
-            "  Fallo definitivo esperado: %.4f%% (~%.1f de %d peticiones).",
-            finalFailureRate * 100.0,
-            finalFailureRate * clientCount,
-            clientCount));
-        appendLog(String.format(
-            "Sin pool: la base acepta como maximo %d conexiones simultaneas "
-            + "(mismo limite que el pool).", poolSize));
-        if (maxRetries == 0) {
-            appendLog("  AVISO: sin reintentos, cada fallo de query es definitivo.");
-        }
-        if (failureRate == 0.0) {
-            appendLog("  AVISO: tasa de fallo 0%; no se simularan fallos de query.");
+            "Fallo aleatorio de query: %.0f%% (igual en ambos modos)", failureRate * 100));
+        if (clientCount > dbMaxConnections) {
+            appendLog(String.format(
+                "  Nota: %d clientes > max_connections (%d). SIN pool se esperan "
+                + "rechazos de la BD; CON pool los clientes esperan en cola.",
+                clientCount, dbMaxConnections));
         }
         appendLog("");
-
-        ConnectionPool.ConnectionFactory factory = () ->
-            new DatabaseConnection(failureRate, connectLatency, queryLatency);
 
         QueryRandomizer randomizer = new QueryRandomizer();
 
         // Ejecutar en hilo de fondo para no bloquear la UI
         Thread simulationThread = new Thread(() -> {
             try {
-                // FASE 1: Con Pool
+                // FASE 1: Con Pool. Cada fase usa un servidor nuevo para que
+                // las estadisticas de conexiones no se mezclen.
                 Platform.runLater(() ->
                     lblProgress.setText("Ejecutando simulacion CON POOL..."));
                 appendLog("[CON POOL] Iniciando...");
 
+                SimulatedDatabase poolDb = new SimulatedDatabase(
+                    dbMaxConnections, dbCores, connectLatency, queryLatency, failureRate);
                 MetricsCollector poolMetrics = new MetricsCollector();
-                long poolWallTime = runSimulation(
-                    true, poolSize, clientCount, requestsPerClient,
-                    maxRetries, retryBackoff, queryLatency,
-                    factory, randomizer, poolMetrics);
+                PhaseResult poolResult = runSimulation(
+                    true, poolSize, borrowTimeout, clientCount, requestsPerClient,
+                    maxRetries, retryBackoff, poolDb, randomizer, poolMetrics);
 
                 appendLog(String.format(
-                    "[CON POOL] Completado en %d ms", poolWallTime));
-                Platform.runLater(() -> updatePoolMetrics(poolMetrics, poolWallTime));
+                    "[CON POOL] Completado en %d ms | %s",
+                    poolResult.wallMillis, describeDb(poolDb)));
+                appendLog(String.format(
+                    "[CON POOL] Timeouts esperando conexion: %d", poolResult.poolTimeouts));
+                Platform.runLater(() ->
+                    updatePoolMetrics(poolMetrics, poolResult.wallMillis, poolDb));
 
                 // FASE 2: Sin Pool
                 Platform.runLater(() -> {
@@ -431,20 +471,24 @@ public class App extends Application {
                 });
                 appendLog("[SIN POOL] Iniciando...");
 
+                SimulatedDatabase noPoolDb = new SimulatedDatabase(
+                    dbMaxConnections, dbCores, connectLatency, queryLatency, failureRate);
                 MetricsCollector noPoolMetrics = new MetricsCollector();
-                long noPoolWallTime = runSimulation(
-                    false, poolSize, clientCount, requestsPerClient,
-                    maxRetries, retryBackoff, queryLatency,
-                    factory, randomizer, noPoolMetrics);
+                PhaseResult noPoolResult = runSimulation(
+                    false, poolSize, borrowTimeout, clientCount, requestsPerClient,
+                    maxRetries, retryBackoff, noPoolDb, randomizer, noPoolMetrics);
 
                 appendLog(String.format(
-                    "[SIN POOL] Completado en %d ms", noPoolWallTime));
+                    "[SIN POOL] Completado en %d ms | %s",
+                    noPoolResult.wallMillis, describeDb(noPoolDb)));
                 Platform.runLater(() ->
-                    updateNoPoolMetrics(noPoolMetrics, noPoolWallTime));
+                    updateNoPoolMetrics(noPoolMetrics, noPoolResult.wallMillis, noPoolDb));
 
                 // FASE 3: Comparacion
-                double poolAvg = poolMetrics.getAverageResponseTime();
-                double noPoolAvg = noPoolMetrics.getAverageResponseTime();
+                long poolWallTime = poolResult.wallMillis;
+                long noPoolWallTime = noPoolResult.wallMillis;
+                double poolAvg = poolMetrics.getAverageSuccessResponseTime();
+                double noPoolAvg = noPoolMetrics.getAverageSuccessResponseTime();
                 double wallImprovement = noPoolWallTime > 0
                     ? ((noPoolWallTime - (double) poolWallTime) / noPoolWallTime) * 100.0
                     : 0.0;
@@ -462,16 +506,18 @@ public class App extends Application {
                     "  RESULTADO: mejora en tiempo de pared = %.2f%%",
                     wallImprovement));
                 appendLog(String.format(
-                    "  RESULTADO: mejora en tiempo promedio = %.2f%%",
+                    "  RESULTADO: mejora en tiempo promedio (exitosas) = %.2f%%",
                     avgImprovement));
                 appendLog(String.format(
-                    "  Tiempo de pared CON POOL:  %d ms", poolWallTime));
+                    "  Throughput CON POOL: %.1f exitosas/s | SIN POOL: %.1f exitosas/s",
+                    poolMetrics.getThroughput(poolWallTime),
+                    noPoolMetrics.getThroughput(noPoolWallTime)));
                 appendLog(String.format(
-                    "  Tiempo de pared SIN POOL: %d ms", noPoolWallTime));
+                    "  Tasa de exito CON POOL: %.2f%% | SIN POOL: %.2f%%",
+                    poolMetrics.getSuccessRate(), noPoolMetrics.getSuccessRate()));
                 appendLog(String.format(
-                    "  Tiempo promedio CON POOL:  %.2f ms", poolAvg));
-                appendLog(String.format(
-                    "  Tiempo promedio SIN POOL: %.2f ms", noPoolAvg));
+                    "  Conexiones abiertas CON POOL: %d | SIN POOL: %d",
+                    poolDb.getTotalOpened(), noPoolDb.getTotalOpened()));
                 appendLog(String.format(
                     "  Intentos CON POOL:  %d (%d reintentos, %d fallos definitivos)",
                     poolAttempts, poolMetrics.getTotalRetries(),
@@ -503,38 +549,53 @@ public class App extends Application {
         simulationThread.start();
     }
 
+    /** Resultado de una fase de la simulacion. */
+    private static final class PhaseResult {
+        final long wallMillis;
+        final long poolTimeouts;
+
+        PhaseResult(long wallMillis, long poolTimeouts) {
+            this.wallMillis = wallMillis;
+            this.poolTimeouts = poolTimeouts;
+        }
+    }
+
+    private static String describeDb(SimulatedDatabase db) {
+        return String.format(
+            "BD: %d conexiones abiertas, pico simultaneo %d/%d, %d rechazadas",
+            db.getTotalOpened(), db.getPeakOpenConnections(),
+            db.getMaxConnections(), db.getTotalRejected());
+    }
+
     /**
-     * Ejecuta la simulacion con o sin pool y devuelve el tiempo de pared.
+     * Ejecuta una fase con o sin pool contra el servidor simulado.
+     *
+     * CON POOL: se abren poolSize conexiones al inicio (warm-up) y los
+     * clientes las piden prestadas y las devuelven. Si no hay libres esperan
+     * en cola hasta borrowTimeout.
+     *
+     * SIN POOL: cada intento abre una conexion nueva directamente contra el
+     * servidor y la cierra al terminar. No hay cola: si el servidor esta en
+     * max_connections, la conexion se rechaza (como en PostgreSQL real).
      */
-    private long runSimulation(boolean withPool, int poolSize,
-                               int clientCount, int requestsPerClient,
-                               int maxRetries, long retryBackoff,
-                               long queryLatencyMillis,
-                               ConnectionPool.ConnectionFactory factory,
-                               QueryRandomizer randomizer,
-                               MetricsCollector metrics) {
+    private PhaseResult runSimulation(boolean withPool, int poolSize, long borrowTimeout,
+                                      int clientCount, int requestsPerClient,
+                                      int maxRetries, long retryBackoff,
+                                      SimulatedDatabase database,
+                                      QueryRandomizer randomizer,
+                                      MetricsCollector metrics) {
 
         ConnectionPool pool = null;
         try {
-            // Sin pool cada peticion abre una conexion nueva, pero el servidor
-            // de base de datos no acepta infinitas conexiones simultaneas.
-            // Se usa el tamano del pool como capacidad de la base para que la
-            // comparacion sea realista y no "sin pool" parezca mas rapido.
-            ConnectionPool.ConnectionFactory effectiveFactory = withPool
-                ? factory
-                : ConnectionPool.limited(factory, poolSize);
-
             if (withPool) {
-                // Con miles de clientes, el timeout fijo de 5 s es demasiado
-                // corto: los clientes que esperan su turno empiezan a fallar
-                // aunque el pool este funcionando bien. Se calcula un timeout
-                // acorde al peor caso de la corrida.
-                long borrowTimeout = computePoolBorrowTimeout(
-                    poolSize, clientCount, requestsPerClient, queryLatencyMillis);
-                appendLog(String.format(
-                    "[CON POOL] Timeout de espera: %d ms", borrowTimeout));
-                pool = new ConnectionPool(poolSize, factory, borrowTimeout);
+                pool = new ConnectionPool(poolSize, database, borrowTimeout);
+                long warmStart = System.nanoTime();
                 pool.warmUp();
+                appendLog(String.format(
+                    "[CON POOL] Warm-up: %d conexiones abiertas en %d ms "
+                    + "(costo unico, fuera de la medicion)",
+                    poolSize,
+                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - warmStart)));
             }
 
             List<Thread> threads = new ArrayList<>();
@@ -546,7 +607,7 @@ public class App extends Application {
                         maxRetries, retryBackoff);
                 } else {
                     client = ClientThread.withoutPool(
-                        i, requestsPerClient, effectiveFactory, randomizer, metrics,
+                        i, requestsPerClient, database, randomizer, metrics,
                         maxRetries, retryBackoff);
                 }
                 threads.add(new Thread(client, "cliente-" + i));
@@ -568,15 +629,16 @@ public class App extends Application {
                     "[AVISO] Peticiones registradas: %d de %d",
                     metrics.getTotalRequests(), expectedRequests));
             }
-            return wallMillis;
+            long timeouts = pool != null ? pool.getStats().getTotalTimeouts() : 0;
+            return new PhaseResult(wallMillis, timeouts);
 
         } catch (SQLException e) {
             appendLog("[ERROR] SQL: " + e.getMessage());
-            return 0;
+            return new PhaseResult(0, 0);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             appendLog("[ERROR] Interrumpido: " + e.getMessage());
-            return 0;
+            return new PhaseResult(0, 0);
         } finally {
             if (pool != null) {
                 pool.close();
@@ -584,48 +646,34 @@ public class App extends Application {
         }
     }
 
-    /**
-     * Calcula un timeout de espera del pool acorde al peor caso de la corrida.
-     *
-     * El valor por defecto (5 s) sirve para cargas pequenas, pero con miles de
-     * clientes el ultimo de la cola puede esperar mas que eso aunque el pool
-     * este funcionando correctamente. Se estima el tiempo total de la fase y
-     * se deja un margen.
-     */
-    private static long computePoolBorrowTimeout(int poolSize, int clientCount,
-                                                 int requestsPerClient,
-                                                 long queryLatencyMillis) {
-        long effectiveQueryMillis = Math.max(queryLatencyMillis, 1L);
-        long estimatedWallMillis = (long) Math.ceil(
-            (double) clientCount * requestsPerClient
-            * effectiveQueryMillis / poolSize);
-        long timeout = estimatedWallMillis * 2L + 5_000L;
-        return Math.max(ConnectionPool.DEFAULT_BORROW_TIMEOUT_MILLIS,
-            Math.min(timeout, 120_000L));
-    }
-
     // ==========================================================
     //  ACTUALIZACION DE UI
     // ==========================================================
 
-    private void updatePoolMetrics(MetricsCollector m, long wallTime) {
+    private void updatePoolMetrics(MetricsCollector m, long wallTime, SimulatedDatabase db) {
         lblPoolTotal.setText(String.valueOf(m.getTotalRequests()));
         lblPoolSuccess.setText(String.valueOf(m.getSuccessfulRequests()));
         lblPoolFailed.setText(String.valueOf(m.getFailedRequests()));
         lblPoolRetries.setText(String.valueOf(m.getTotalRetries()));
-        lblPoolAvgTime.setText(String.format("%.2f ms", m.getAverageResponseTime()));
+        lblPoolAvgTime.setText(String.format("%.2f ms", m.getAverageSuccessResponseTime()));
         lblPoolSuccessRate.setText(String.format("%.2f%%", m.getSuccessRate()));
         lblPoolWallTime.setText(wallTime + " ms");
+        lblPoolOpened.setText(String.valueOf(db.getTotalOpened()));
+        lblPoolPeak.setText(db.getPeakOpenConnections() + " / " + db.getMaxConnections());
+        lblPoolRejected.setText(String.valueOf(db.getTotalRejected()));
     }
 
-    private void updateNoPoolMetrics(MetricsCollector m, long wallTime) {
+    private void updateNoPoolMetrics(MetricsCollector m, long wallTime, SimulatedDatabase db) {
         lblNoPoolTotal.setText(String.valueOf(m.getTotalRequests()));
         lblNoPoolSuccess.setText(String.valueOf(m.getSuccessfulRequests()));
         lblNoPoolFailed.setText(String.valueOf(m.getFailedRequests()));
         lblNoPoolRetries.setText(String.valueOf(m.getTotalRetries()));
-        lblNoPoolAvgTime.setText(String.format("%.2f ms", m.getAverageResponseTime()));
+        lblNoPoolAvgTime.setText(String.format("%.2f ms", m.getAverageSuccessResponseTime()));
         lblNoPoolSuccessRate.setText(String.format("%.2f%%", m.getSuccessRate()));
         lblNoPoolWallTime.setText(wallTime + " ms");
+        lblNoPoolOpened.setText(String.valueOf(db.getTotalOpened()));
+        lblNoPoolPeak.setText(db.getPeakOpenConnections() + " / " + db.getMaxConnections());
+        lblNoPoolRejected.setText(String.valueOf(db.getTotalRejected()));
     }
 
     @SuppressWarnings("unchecked")
@@ -636,7 +684,7 @@ public class App extends Application {
         XYChart.Series<String, Number> poolSeries = new XYChart.Series<>();
         poolSeries.setName("Con Pool");
         poolSeries.getData().add(new XYChart.Data<>(
-            "Tiempo promedio (ms)", poolM.getAverageResponseTime()));
+            "Tiempo promedio exitosas (ms)", poolM.getAverageSuccessResponseTime()));
         poolSeries.getData().add(new XYChart.Data<>(
             "Tiempo de pared (ms)", poolWall));
         poolSeries.getData().add(new XYChart.Data<>(
@@ -647,7 +695,7 @@ public class App extends Application {
         XYChart.Series<String, Number> noPoolSeries = new XYChart.Series<>();
         noPoolSeries.setName("Sin Pool");
         noPoolSeries.getData().add(new XYChart.Data<>(
-            "Tiempo promedio (ms)", noPoolM.getAverageResponseTime()));
+            "Tiempo promedio exitosas (ms)", noPoolM.getAverageSuccessResponseTime()));
         noPoolSeries.getData().add(new XYChart.Data<>(
             "Tiempo de pared (ms)", noPoolWall));
         noPoolSeries.getData().add(new XYChart.Data<>(
@@ -666,6 +714,9 @@ public class App extends Application {
         lblPoolAvgTime.setText("0.00 ms");
         lblPoolSuccessRate.setText("0.00%");
         lblPoolWallTime.setText("0 ms");
+        lblPoolOpened.setText("0");
+        lblPoolPeak.setText("0");
+        lblPoolRejected.setText("0");
 
         lblNoPoolTotal.setText("0");
         lblNoPoolSuccess.setText("0");
@@ -674,6 +725,9 @@ public class App extends Application {
         lblNoPoolAvgTime.setText("0.00 ms");
         lblNoPoolSuccessRate.setText("0.00%");
         lblNoPoolWallTime.setText("0 ms");
+        lblNoPoolOpened.setText("0");
+        lblNoPoolPeak.setText("0");
+        lblNoPoolRejected.setText("0");
 
         chart.getData().clear();
         txtLog.clear();

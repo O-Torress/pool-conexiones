@@ -10,7 +10,7 @@ Este documento explica de forma clara y directa cómo verificar y probar cada co
 - **Terminal:** PowerShell o CMD en Windows.
 - **Ubicación:** Estar dentro de la carpeta del proyecto:
   ```powershell
-  cd c:\Users\Usuario\Desktop\POOL\pool-conexiones
+  cd c:\Users\Usuario\Desktop\PoolComparacion\pool-conexiones
   ```
 > **Nota:** No necesitas instalar Maven manualmente. El proyecto incluye el ejecutable `.\mvnw.cmd` (Maven Wrapper) que gestiona todo de forma automática.
 
@@ -33,7 +33,7 @@ Este paso valida automáticamente que el pool de conexiones (`ConnectionPool`), 
 [INFO] Tests run: 9, Failures: 0, Errors: 0, Skipped: 0
 [INFO] 
 [INFO] Results:
-[INFO] Tests run: 11, Failures: 0, Errors: 0, Skipped: 1
+[INFO] Tests run: 14, Failures: 0, Errors: 0, Skipped: 1
 [INFO] BUILD SUCCESS
 ```
 
@@ -54,16 +54,16 @@ La interfaz gráfica permite manipular todos los parámetros de la simulación, 
 ### ¿Cómo interactuar con la aplicación?
 1. Se abrirá una ventana titulada **"Simulador de Pool de Conexiones"**.
 2. En el panel izquierdo de **Configuración**, deja los valores por defecto o personalízalos:
-   - **Tamaño del pool:** `10`
-   - **Clientes concurrentes:** `20`
-   - **Peticiones por cliente:** `50` (total 1,000 consultas)
-   - **Tasa de fallo:** `0.10` (10%)
-   - **Latencia de conexión:** `50 ms`
-   - **Latencia de query:** `10 ms`
+   - **Tamaño del pool:** `10` · **Timeout de espera:** `30000 ms`
+   - **Clientes concurrentes:** `20` (1 petición por cliente)
+   - **max_connections BD:** `100` · **Núcleos CPU BD:** `8`
+   - **Fallo aleatorio query:** `0.0` (ruido opcional; afecta igual a ambos modos)
+   - **Latencia de conexión:** `50 ms` · **Latencia de query:** `10 ms`
 3. Presiona el botón verde **"Ejecutar simulación"**.
 4. **Observa los resultados:**
-   - **Fase 1 (Verde - CON POOL):** Las conexiones se crean al inicio (warm-up) y se reutilizan entre clientes. El tiempo promedio por consulta rondará los **10 - 20 ms**.
-   - **Fase 2 (Rojo - SIN POOL):** Cada petición abre y cierra una conexión nueva (pagando los 50 ms de latencia cada vez). El tiempo promedio subirá a **60 - 80 ms**.
+   - **Fase 1 (Verde - CON POOL):** Las conexiones se crean al inicio (warm-up) y se reutilizan. "Conexiones abiertas" = 10, "Rechazos de la BD" = 0.
+   - **Fase 2 (Rojo - SIN POOL):** Cada petición abre y cierra una conexión nueva (50 ms de CPU del servidor cada vez). "Conexiones abiertas" = 20 y el tiempo promedio es varias veces mayor.
+   - **Prueba de sobrecarga:** sube **Clientes** a `200` o `1000`. CON POOL sigue en 100 % de éxito (los clientes esperan su turno); SIN POOL la BD llega a 100/100 conexiones y **rechaza** el resto, por eso cae la tasa de éxito.
    - **Gráfico de Barras:** Muestra la comparación visual directa entre ambos escenarios.
    - **Log de Actividad:** Muestra el porcentaje exacto de mejora obtenido al usar el pool (típicamente entre **60% y 80% de mejora**).
 5. Puedes presionar **"Limpiar"** para reiniciar los tableros y probar con otros valores.
@@ -81,28 +81,25 @@ Si quieres hacer una prueba rápida en terminal sin abrir ventanas:
 
 ### ¿Qué esperar en la salida?
 ```text
-Simulacion: 20 clientes x 50 peticiones = 1000 peticiones logicas
-Pool size: 10 | Fallo por query: 10.0% | Reintentos maximos: 2
+Simulacion: 200 clientes x 1 peticion = 200 peticiones logicas
+Pool: 10 | BD: max_connections=100, CPU=8, abrir=50 ms, query=10 ms | Reintentos maximos: 2
 
-CON POOL -> tiempo total de pared: 1120 ms
-SIN POOL -> tiempo total de pared: 3540 ms
+CON POOL -> tiempo total de pared: ~400 ms
+SIN POOL -> tiempo total de pared: ~970 ms
 
 ===== CON POOL =====
-Peticiones totales: 1000
-Exitosas: 894
-Fallidas: 106
-Porcentaje de exito: 89.4%
-Tiempo promedio: ~15.2 ms
+Exitosas: 200 | Fallidas: 0 | Porcentaje de exito: 100,00%
+Tiempo promedio (exitosas): ~190 ms
+SimulatedDatabase{... pico=10, abiertasTotal=10, rechazadas=0}
 
 ===== SIN POOL =====
-Peticiones totales: 1000
-Exitosas: 898
-Fallidas: 102
-Porcentaje de exito: 89.8%
-Tiempo promedio: ~64.8 ms
+Exitosas: 100 | Fallidas: 100 | Porcentaje de exito: 50,00%
+Tiempo promedio (exitosas): ~860 ms
+SimulatedDatabase{... pico=100, abiertasTotal=100, rechazadas=300}
 
-Mejora del tiempo promedio usando pool: 76.54%
+Mejora del tiempo promedio (exitosas) usando pool: ~77%
 ```
+(Los números exactos varían un poco en cada ejecución.)
 
 ---
 

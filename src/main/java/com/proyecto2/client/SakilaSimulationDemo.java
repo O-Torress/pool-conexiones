@@ -63,8 +63,8 @@ public final class SakilaSimulationDemo {
         printResult("CON POOL", withPool);
         printResult("SIN POOL", withoutPool);
 
-        double poolAverage = withPool.metrics.getAverageResponseTime();
-        double noPoolAverage = withoutPool.metrics.getAverageResponseTime();
+        double poolAverage = withPool.metrics.getAverageSuccessResponseTime();
+        double noPoolAverage = withoutPool.metrics.getAverageSuccessResponseTime();
         if (noPoolAverage > 0.0) {
             double improvement =
                 ((noPoolAverage - poolAverage) / noPoolAverage) * 100.0;

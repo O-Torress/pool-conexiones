@@ -10,6 +10,8 @@ public class MetricsCollector {
 
     // Tiempo acumulado en nanosegundos
     private long totalResponseTime;
+    // Tiempo acumulado solo de las peticiones exitosas
+    private long successResponseTime;
 
     // Constructor
     public MetricsCollector() {
@@ -32,6 +34,7 @@ public class MetricsCollector {
 
         if (success) {
             successfulRequests++;
+            successResponseTime += responseTimeNanos;
         } else {
             failedRequests++;
         }
@@ -90,16 +93,40 @@ public class MetricsCollector {
         return totalMilliseconds / totalRequests;
     }
 
+    /**
+     * Tiempo promedio de respuesta (ms) contando SOLO las peticiones exitosas.
+     *
+     * Es la metrica correcta para comparar rendimiento: una peticion que la
+     * base de datos rechaza al instante "tarda" muy poco, y si se promedia
+     * junto con las exitosas haria parecer mas rapido al modo que mas falla.
+     */
+    public synchronized double getAverageSuccessResponseTime() {
+        if (successfulRequests == 0) {
+            return 0;
+        }
+        return successResponseTime / 1000000.0 / successfulRequests;
+    }
+
+    /** Peticiones exitosas por segundo, dado el tiempo de pared de la fase. */
+    public synchronized double getThroughput(long wallMillis) {
+        if (wallMillis <= 0) {
+            return 0;
+        }
+        return successfulRequests * 1000.0 / wallMillis;
+    }
+
     // Genera un resumen con todas las metricas
     public synchronized String getSummary() {
         return "Peticiones totales: " + totalRequests
             + "\nExitosas: " + successfulRequests
             + "\nFallidas: " + failedRequests
-            + "\nPorcentaje de exito: " + getSuccessRate() + "%"
-            + "\nPorcentaje de fallos: " + getFailureRate() + "%"
+            + String.format("%nPorcentaje de exito: %.2f%%", getSuccessRate())
+            + String.format("%nPorcentaje de fallos: %.2f%%", getFailureRate())
             + "\nReintentos: " + totalRetries
-            + "\nTiempo promedio: "
-            + getAverageResponseTime() + " ms";
+            + String.format("%nTiempo promedio (exitosas): %.2f ms",
+                getAverageSuccessResponseTime())
+            + String.format("%nTiempo promedio (todas): %.2f ms",
+                getAverageResponseTime());
     }
 
     // Reinicia las metricas
@@ -109,5 +136,6 @@ public class MetricsCollector {
         failedRequests = 0;
         totalRetries = 0;
         totalResponseTime = 0;
+        successResponseTime = 0;
     }
 }

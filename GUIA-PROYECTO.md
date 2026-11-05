@@ -93,7 +93,7 @@ sequenceDiagram
 
 ### Compilar
 ```powershell
-cd c:\Users\Usuario\Desktop\POOL\pool-conexiones
+cd c:\Users\Usuario\Desktop\PoolComparacion\pool-conexiones
 .\mvnw.cmd compile
 ```
 
@@ -104,7 +104,7 @@ cd c:\Users\Usuario\Desktop\POOL\pool-conexiones
 
 Deberías ver:
 ```
-Tests run: 11, Failures: 0, Errors: 0, Skipped: 1
+Tests run: 14, Failures: 0, Errors: 0, Skipped: 1
 BUILD SUCCESS
 ```
 > El test skipped (`SakilaIntegrationTest`) es normal si no tienes PostgreSQL con Sakila configurado.
@@ -148,7 +148,7 @@ Si solo quieres ver los resultados en terminal:
 ```powershell
 .\mvnw.cmd test
 ```
-**Esperado:** `Tests run: 11, Failures: 0, Errors: 0`
+**Esperado:** `Tests run: 14, Failures: 0, Errors: 0, Skipped: 1`
 
 Los tests verifican:
 - Que el pool **nunca excede** el tamaño máximo de conexiones
@@ -157,26 +157,31 @@ Los tests verifican:
 - Que **no se puede liberar** una conexión dos veces
 - Que al cerrar el pool, **no se aceptan** nuevas peticiones
 - Que las **métricas** cuentan correctamente éxitos, fallos y reintentos
+- Que la BD simulada **rechaza** conexiones por encima de `max_connections`
+- Que **con pool** nunca hay rechazos y solo se abren `poolSize` conexiones
+- Que **sin pool** y con más clientes que `max_connections` aparecen rechazos y fallos
 
 ### ✅ Verificación 2: Demo por consola
 ```powershell
 .\mvnw.cmd exec:java -Dexec.mainClass="com.proyecto2.client.ClientSimulationDemo"
 ```
-**Esperado:** Verás algo como:
+Por defecto usa 200 clientes y pool de 10. Puedes pasar `clientes` y `tamañoPool`:
+`-Dexec.args="1000 10"`.
+
+**Esperado (200 clientes, pool 10, max_connections 100):**
 ```
 ===== CON POOL =====
-Peticiones totales: 1000
-Exitosas: ~900
-Tiempo promedio: ~X ms
+Exitosas: 200 | Fallidas: 0 | Tiempo promedio (exitosas): ~190 ms
+SimulatedDatabase{... pico=10, abiertasTotal=10, rechazadas=0}
 
 ===== SIN POOL =====
-Peticiones totales: 1000
-Exitosas: ~900
-Tiempo promedio: ~Y ms (mayor que X)
+Exitosas: ~100 | Fallidas: ~100 | Tiempo promedio (exitosas): ~860 ms
+SimulatedDatabase{... pico=100, abiertasTotal=100, rechazadas=~300}
 
-Mejora del tiempo promedio usando pool: ~Z%
+Mejora del tiempo promedio (exitosas) usando pool: ~75%
 ```
-> El tiempo promedio **CON POOL** debe ser significativamente menor porque reutiliza conexiones en vez de abrir una nueva cada vez.
+> **CON POOL**: 0 fallos, 10 conexiones abiertas en total. **SIN POOL**: una conexión por petición,
+> la BD se llena (pico = max_connections) y rechaza el resto.
 
 ### ✅ Verificación 3: Interfaz gráfica
 ```powershell
@@ -197,7 +202,6 @@ pool-conexiones/
 ├── mvnw.cmd                         # Maven Wrapper (Windows)
 ├── .mvn/wrapper/                    # Archivos del Maven Wrapper
 ├── src/main/java/
-│   ├── module-info.java             # Módulo Java (requerido por JavaFX)
 │   └── com/proyecto2/
 │       ├── App.java                 # Punto de entrada principal
 │       ├── pool/
@@ -213,6 +217,7 @@ pool-conexiones/
 │       │   └── MetricsCollector.java # Recolección de métricas
 │       ├── database/
 │       │   ├── DatabaseConfig.java  # Configuración de conexión
+│       │   ├── SimulatedDatabase.java  # BD simulada (max_connections + CPU)
 │       │   └── PostgresConnectionFactory.java  # Fábrica JDBC
 │       └── ui/
 │           └── App.java             # Interfaz gráfica JavaFX
@@ -222,7 +227,8 @@ pool-conexiones/
     └── com/proyecto2/
         ├── AppTest.java             # Test básico
         ├── database/
-        │   └── SakilaIntegrationTest.java  # Test de integración
+        │   ├── SakilaIntegrationTest.java  # Test de integración
+        │   └── SimulatedDatabaseTest.java  # Pool vs sin pool contra la BD simulada
         └── pool/
             └── ConnectionPoolTest.java     # Tests del pool (9 tests)
 ```
@@ -237,7 +243,36 @@ pool-conexiones/
 | Tiempo promedio | Alto (incluye latencia de apertura) | Bajo (reutiliza) |
 | Tiempo total de pared | Mayor | Menor |
 | Uso de recursos | Muchas conexiones simultáneas | Limitado al tamaño del pool |
+| Con más clientes que `max_connections` | La BD rechaza conexiones → fallos | Los clientes esperan en cola → 0 fallos |
 | Concurrencia | Sin control | Controlada con locks |
 
-> **El pool siempre gana** en rendimiento cuando la latencia de apertura es significativa respecto al tiempo de query.
+> El pool gana porque (1) no paga la apertura en cada petición y (2) protege a la BD: nunca abre más conexiones que su tamaño.
+> Con cargas extremas (miles de clientes y pool chico) el pool hace **esperar** a los clientes en vez de fallar: el tiempo promedio sube
+> (Ley de Little), pero la tasa de éxito se mantiene en 100 % mientras no se supere el timeout.
+
+---
+
+## Modelo de simulación (corregido)
+
+La primera versión daba números ilógicos porque la base de datos simulada **no tenía límites**:
+el fallo era una moneda al aire del 10 % en cada query (igual con o sin pool) y el modo
+"sin pool" pasaba por un semáforo que en la práctica era otro pool. Ahora la base de datos
+se simula con `SimulatedDatabase`, que se comporta como un PostgreSQL real:
+
+| Límite del servidor | Qué pasa |
+|---|---|
+| `max_connections` (100 por defecto) | Las conexiones por encima del límite se **rechazan** con `too many clients already` (SQLState 53300). No se encolan. |
+| Núcleos de CPU (8 por defecto) | Abrir una conexión (crear backend + autenticación) y ejecutar una query **ocupan CPU**. Si hay más trabajo que núcleos, el servidor se satura. |
+
+Con eso, la teoría se cumple sola:
+
+- **CON pool:** se abren `poolSize` conexiones una sola vez (warm-up) y se reutilizan. Nunca se supera
+  `max_connections`, así que no hay rechazos. Si hay más clientes que conexiones, esperan en cola
+  (hasta el timeout, 30 s por defecto como HikariCP).
+- **SIN pool:** cada petición paga la apertura (50 ms de CPU del servidor). Con más clientes que
+  `max_connections`, el servidor rechaza conexiones → aparecen fallos y reintentos.
+
+El **tiempo promedio** se calcula solo con peticiones **exitosas**: una petición rechazada falla en
+0 ms y, si se promediara, haría parecer "más rápido" al modo que más falla.
+
 

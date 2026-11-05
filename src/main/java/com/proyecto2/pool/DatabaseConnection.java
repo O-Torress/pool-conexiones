@@ -30,8 +30,19 @@ public class DatabaseConnection implements AutoCloseable {
     private final double simulatedQueryFailureRate;
     private final long simulatedQueryLatencyMillis;
     private final int queryTimeoutSeconds;
+    private final SimulatedServer simulatedServer;
 
     private volatile boolean closed;
+
+    /**
+     * Servidor simulado que ejecuta el trabajo de una consulta. Permite que
+     * la consulta compita por los recursos (CPU) del servidor en vez de ser
+     * un simple sleep independiente de la carga.
+     */
+    @FunctionalInterface
+    public interface SimulatedServer {
+        void execute(long workMillis) throws SQLException;
+    }
     private volatile Runnable onClose;
 
     /**
@@ -66,6 +77,33 @@ public class DatabaseConnection implements AutoCloseable {
         this.simulatedQueryFailureRate = 0.0;
         this.simulatedQueryLatencyMillis = 0L;
         this.queryTimeoutSeconds = queryTimeoutSeconds;
+        this.simulatedServer = null;
+    }
+
+    /**
+     * Conexion simulada ya abierta por un servidor simulado
+     * (ver com.proyecto2.database.SimulatedDatabase). El costo de apertura lo
+     * paga el servidor antes de llamar a este constructor; cada consulta se
+     * ejecuta a traves de {@code server}.
+     */
+    public DatabaseConnection(double queryFailureRate, long queryLatencyMillis,
+                              SimulatedServer server) {
+        if (queryFailureRate < 0.0 || queryFailureRate > 1.0) {
+            throw new IllegalArgumentException(
+                "queryFailureRate debe estar entre 0.0 y 1.0");
+        }
+        if (queryLatencyMillis < 0) {
+            throw new IllegalArgumentException("La latencia no puede ser negativa");
+        }
+        if (server == null) {
+            throw new IllegalArgumentException("server no puede ser null");
+        }
+        this.id = NEXT_ID.getAndIncrement();
+        this.jdbcConnection = null;
+        this.simulatedQueryFailureRate = queryFailureRate;
+        this.simulatedQueryLatencyMillis = queryLatencyMillis;
+        this.queryTimeoutSeconds = DEFAULT_QUERY_TIMEOUT_SECONDS;
+        this.simulatedServer = server;
     }
 
     /**
@@ -88,6 +126,7 @@ public class DatabaseConnection implements AutoCloseable {
         this.simulatedQueryFailureRate = queryFailureRate;
         this.simulatedQueryLatencyMillis = queryLatencyMillis;
         this.queryTimeoutSeconds = DEFAULT_QUERY_TIMEOUT_SECONDS;
+        this.simulatedServer = null;
 
         sleepOrThrow(connectLatencyMillis, "apertura de la conexion " + id);
     }
@@ -107,12 +146,16 @@ public class DatabaseConnection implements AutoCloseable {
     }
 
     private String executeSimulatedQuery(String query) throws SQLException {
-        try {
-            Thread.sleep(simulatedQueryLatencyMillis);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new SQLException(
-                "Ejecucion interrumpida en la conexion " + id, e);
+        if (simulatedServer != null) {
+            simulatedServer.execute(simulatedQueryLatencyMillis);
+        } else {
+            try {
+                Thread.sleep(simulatedQueryLatencyMillis);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new SQLException(
+                    "Ejecucion interrumpida en la conexion " + id, e);
+            }
         }
 
         if (closed) {
@@ -185,7 +228,7 @@ public class DatabaseConnection implements AutoCloseable {
 
     /**
      * Registra una accion que se ejecuta una sola vez al cerrar la conexion.
-     * Se usa para liberar el cupo de conexiones simultaneas del modo sin pool.
+     * La usa SimulatedDatabase para liberar el cupo de max_connections.
      */
     public synchronized void setOnClose(Runnable onClose) {
         if (onClose == null) {
